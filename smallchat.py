@@ -193,14 +193,14 @@ class GPTLanguageModel(nn.Module):
 # --- Hyperparameters ---
 file_path = 'data.txt'
 model_save_path = 'trained_model.pt'  # Path to save/load the model
-block_size = 64
-batch_size = 32
-n_embd = 64
-n_head = 4
-n_layer = 4
+block_size = 128
+batch_size = 8
+n_embd = 128
+n_head = 8
+n_layer = 6
 dropout = 0.1
-num_epochs = 10
-learning_rate = 1e-3
+num_epochs = 30
+learning_rate = 3e-4
 
 # Create dataset
 dataset = TextDataset(file_path, block_size)

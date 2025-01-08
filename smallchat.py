@@ -1,57 +1,20 @@
+'''
+This file is part of SmallchatGPT.
+
+SmallchatGPT is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+SmallchatGPT is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with SmallchatGPT. If not, see <https://www.gnu.org/licenses/>.
+'''
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, random_split
 import os
-
-# --- Data Preprocessing ---
-
-
-class TextDataset(Dataset):
-    def __init__(self, file_path, block_size):
-        self.block_size = block_size
-        self.vocab = set()
-        self.data = []
-
-        # Read the file and create the vocabulary
-        with open(file_path, 'r', encoding='utf-8') as f:
-            for line in f:
-                question, answer = line.strip().split('\t')
-                self.vocab.update(list(question))
-                self.vocab.update(list(answer))
-                self.data.append((question, answer))
-
-        # Add special tokens
-        self.vocab.add('<pad>')  # Padding token
-        self.vocab.add('<s>')    # Start of sequence token
-        self.vocab.add('</s>')   # End of sequence token
-
-        self.word2idx = {word: i for i, word in enumerate(sorted(self.vocab))}
-        self.idx2word = {i: word for word, i in self.word2idx.items()}
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        question, answer = self.data[idx]
-        combined_text = '<s>' + question + '\t' + answer + '</s>'
-
-        # Convert text to indices, handling unknown characters
-        indexed_text = [self.word2idx.get(
-            word, self.word2idx['<pad>']) for word in combined_text]
-
-        # Pad or truncate to block_size
-        if len(indexed_text) < self.block_size:
-            indexed_text += [self.word2idx['<pad>']] * \
-                (self.block_size - len(indexed_text))
-        else:
-            indexed_text = indexed_text[:self.block_size]
-
-        # Input: all but last token
-        x = torch.tensor(indexed_text[:-1], dtype=torch.long)
-        # Target: shift by one (next token prediction)
-        y = torch.tensor(indexed_text[1:], dtype=torch.long)
-        return x, y
+from data_utils import JSONDataset  # Import JSONDataset
+from utils import save_checkpoint, interrupted, signal_handler  # Import from utils.py
 
 # --- Model Definition ---
 
@@ -73,14 +36,11 @@ class Head(nn.Module):
         B, T, C = x.shape
         k = self.key(x)   # (B,T,C)
         q = self.query(x)  # (B,T,C)
-        # compute attention scores ("affinities")
-        # (B, T, C) @ (B, C, T) -> (B, T, T)
         wei = q @ k.transpose(-2, -1) * C**-0.5
         wei = wei.masked_fill(
             self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
         wei = self.dropout(wei)
-        # perform the weighted aggregation of the values
         v = self.value(x)  # (B,T,C)
         out = wei @ v  # (B, T, T) @ (B, T, C) -> (B, T, C)
         return out
@@ -140,70 +100,87 @@ class Block(nn.Module):
 class GPTLanguageModel(nn.Module):
     def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout):
         super().__init__()
-        # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
         self.blocks = nn.Sequential(
             *[Block(n_embd, n_head, block_size, dropout) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd)  # final layer norm
+        self.ln_f = nn.LayerNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size)
-
         self.block_size = block_size
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
-
-        # idx and targets are both (B,T) tensor of integers
-        tok_emb = self.token_embedding_table(idx)  # (B,T,C)
+        tok_emb = self.token_embedding_table(idx)
         pos_emb = self.position_embedding_table(
-            torch.arange(T, device=idx.device))  # (T,C)
-        x = tok_emb + pos_emb  # (B,T,C)
-        x = self.blocks(x)  # (B,T,C)
-        x = self.ln_f(x)  # (B,T,C)
-        logits = self.lm_head(x)  # (B,T,vocab_size)
+            torch.arange(T, device=idx.device))
+        x = tok_emb + pos_emb
+        x = self.blocks(x)
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
 
         if targets is None:
             loss = None
         else:
             B, T, C = logits.shape
-            logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
+            logits = logits.view(B * T, C)
+            targets = targets.view(B * T)
             loss = F.cross_entropy(logits, targets)
 
         return logits, loss
 
-    def generate(self, idx, max_new_tokens):
-        # idx is (B, T) array of indices in the current context
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, do_sample=False, top_k=None):
         for _ in range(max_new_tokens):
-            # crop idx to the last block_size tokens
-            idx_cond = idx[:, -self.block_size:]
-            # get the predictions
-            logits, loss = self(idx_cond)
-            # focus only on the last time step
-            logits = logits[:, -1, :]  # becomes (B, C)
-            # apply softmax to get probabilities
-            probs = F.softmax(logits, dim=-1)  # (B, C)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1)  # (B, 1)
-            # append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
+            idx_cond = idx if idx.size(
+                1) <= self.block_size else idx[:, -self.block_size:]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+
+            if top_k is not None:
+                v, _ = torch.topk(logits, top_k)
+                logits[logits < v[:, [-1]]] = -float('Inf')
+
+            probs = F.softmax(logits, dim=-1)
+
+            if do_sample:
+                idx_next = torch.multinomial(probs, num_samples=1)
+            else:
+                _, idx_next = torch.topk(probs, k=1, dim=-1)
+
+            idx = torch.cat((idx, idx_next), dim=1)
+
         return idx
 
 
 # --- Hyperparameters ---
-file_path = 'data.txt'
-model_save_path = 'trained_model.pt'  # Path to save/load the model
+file_path = 'data.json'  # Update with your JSON file path
+model_save_path = 'trained_model.pt'
 block_size = 128
-batch_size = 8
+batch_size = 16
 n_embd = 128
-n_head = 8
-n_layer = 6
-dropout = 0.1
-num_epochs = 30
-learning_rate = 3e-4
+n_head = 4
+n_layer = 4
+dropout = 0.2
+num_epochs = 50
+learning_rate = 1e-3
 
-# Create dataset
-dataset = TextDataset(file_path, block_size)
+# Create dataset and split into training and validation sets
+dataset = JSONDataset(file_path, block_size)
+train_size = int(0.9 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
 vocab_size = len(dataset.vocab)
 
 # Initialize model
@@ -211,39 +188,102 @@ model = GPTLanguageModel(vocab_size, n_embd, block_size,
                          n_head, n_layer, dropout)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(
+    model.parameters(), lr=learning_rate, weight_decay=1e-1)
+
+# --- Training Loop ---
+
+
+def train(model, data_loader, optimizer, device):
+    model.train()
+    for batch_idx, (x, y) in enumerate(data_loader):
+        x, y = x.to(device), y.to(device)
+        logits, loss = model(x, y)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        if batch_idx % 10 == 0:
+            print(
+                f"Batch {batch_idx+1}/{len(data_loader)}, Loss: {loss.item():.4f}")
+        if interrupted:
+            return loss.item()
+    return loss.item()
+
+# --- Validation Loop ---
+
+
+def validate(model, data_loader, device):
+    model.eval()
+    total_loss = 0
+    with torch.no_grad():
+        for batch_idx, (x, y) in enumerate(data_loader):
+            x, y = x.to(device), y.to(device)
+            logits, loss = model(x, y)
+            total_loss += loss.item()
+    return total_loss / len(data_loader)
+
 
 # --- Check for Saved Model ---
 if os.path.exists(model_save_path):
     # Load the saved model
     print("Loading saved model...")
-    checkpoint = torch.load(model_save_path)
+    checkpoint = torch.load(model_save_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    model.to(device)  # Make sure to move the loaded model to the correct device
+    start_epoch = checkpoint['epoch']
+
+    # Handle case where these were not saved in the checkpoint (older version)
+    # Default to -1 (end of epoch) if not found
+    start_batch = checkpoint.get('batch_idx', -1)
+    # Default to infinity if not found
+    best_val_loss = checkpoint.get('val_loss', float('inf'))
+
+    model.to(device)
     print("Model loaded!")
 else:
     # Train a new model
     print("No saved model found. Starting training...")
-    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    for epoch in range(num_epochs):
-        for batch_idx, (x, y) in enumerate(data_loader):
-            x, y = x.to(device), y.to(device)
-            logits, loss = model(x, y)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
-            if batch_idx % 10 == 0:
-                print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx +
-                      1}/{len(data_loader)}, Loss: {loss.item():.4f}")
+    start_epoch = 0
+    start_batch = -1
+    best_val_loss = float('inf')
 
-    # Save the trained model
-    print("Training finished. Saving model...")
-    torch.save({
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-    }, model_save_path)
-    print("Model saved!")
+# Train a new model
+print("No saved model found. Starting training...")
+for epoch in range(start_epoch, num_epochs):
+    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    if epoch == start_epoch:
+        start_batch_index = start_batch + 1
+    else:
+        start_batch_index = 0
+    for batch_idx, (x, y) in enumerate(data_loader):
+        if batch_idx < start_batch_index:
+            continue
+        x, y = x.to(device), y.to(device)
+        logits, loss = model(x, y)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+
+        if interrupted:
+            print("Saving model and exiting...")
+            save_checkpoint(model, optimizer, epoch,
+                            model_save_path, batch_idx, best_val_loss)
+            exit()
+
+        if batch_idx % 10 == 0:
+            print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx +
+                  1}/{len(data_loader)}, Loss: {loss.item():.4f}")
+
+    val_loss = validate(model, val_loader, device)
+    print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item():.4f}, Validation Loss: {val_loss:.4f}")
+
+    # Save the model if validation loss improves
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        print("Saving model...")
+        save_checkpoint(model, optimizer, epoch,
+                        model_save_path, batch_idx, best_val_loss)
+        print("Model saved!")
 
 # --- Chat Loop ---
 model.eval()
@@ -253,19 +293,32 @@ with torch.no_grad():
         if context.lower() == "quit":
             break
 
-        indexed_context = [dataset.word2idx.get(
+        indexed_context = [dataset.word2idx['<s>']] + [dataset.word2idx.get(
             word, dataset.word2idx['<pad>']) for word in context]
         x = torch.tensor(indexed_context, dtype=torch.long,
                          device=device).unsqueeze(0)
 
-        generated_text = model.generate(x, max_new_tokens=50)[0].tolist()
+        generated_text = model.generate(
+            x, max_new_tokens=50, temperature=0.7, do_sample=True)[0].tolist()
+
         decoded_text = ''.join(
             [dataset.idx2word[idx] for idx in generated_text if idx != dataset.word2idx['<pad>']])
 
-        response_end_index = decoded_text.find('</s>')
-        if response_end_index != -1:
-            response = decoded_text[len(context):response_end_index]
+        # Find the start of the response in the decoded text
+        response_start_index = decoded_text.find(
+            '<s>') + len('<s>')  # Skip the <s> token
+        if response_start_index != -1:  # Find the end of the response (</s>)
+            response_end_index = decoded_text.find(
+                '</s>', response_start_index)
+            if response_end_index != -1:
+                response = decoded_text[response_start_index:response_end_index]
+            else:
+                # Fallback: take everything after <s>
+                response = decoded_text[response_start_index:]
         else:
-            response = decoded_text[len(context):]
+            response = decoded_text
+
+        # Remove leading/trailing whitespace
+        response = response.strip()
 
         print(f"GPT: {response}")

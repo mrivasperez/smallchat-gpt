@@ -17,9 +17,8 @@ from data_utils import JSONDataset
 # type: ignore used in signal handling
 from utils import save_checkpoint, interrupted, signal_handler
 
+
 # --- Model Definition ---
-
-
 class Head(nn.Module):
     """ one head of self-attention """
 
@@ -274,7 +273,7 @@ for epoch in range(start_epoch, num_epochs):
                   1}/{len(data_loader)}, Loss: {loss.item():.4f}")
 
     val_loss = validate(model, val_loader, device)
-    print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item()          :.4f}, Validation Loss: {val_loss:.4f}")
+    print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item():.4f}, Validation Loss: {val_loss:.4f}")
 
     # Save the model if validation loss improves
     if val_loss < best_val_loss:

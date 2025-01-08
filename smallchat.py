@@ -13,8 +13,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 import os
-from data_utils import JSONDataset  # Import JSONDataset
-from utils import save_checkpoint, interrupted, signal_handler  # Import from utils.py
+from data_utils import JSONDataset
+# type: ignore used in signal handling
+from utils import save_checkpoint, interrupted, signal_handler
 
 # --- Model Definition ---
 
@@ -191,9 +192,8 @@ model.to(device)
 optimizer = torch.optim.AdamW(
     model.parameters(), lr=learning_rate, weight_decay=1e-1)
 
+
 # --- Training Loop ---
-
-
 def train(model, data_loader, optimizer, device):
     model.train()
     for batch_idx, (x, y) in enumerate(data_loader):
@@ -209,9 +209,8 @@ def train(model, data_loader, optimizer, device):
             return loss.item()
     return loss.item()
 
+
 # --- Validation Loop ---
-
-
 def validate(model, data_loader, device):
     model.eval()
     total_loss = 0
@@ -275,7 +274,7 @@ for epoch in range(start_epoch, num_epochs):
                   1}/{len(data_loader)}, Loss: {loss.item():.4f}")
 
     val_loss = validate(model, val_loader, device)
-    print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item():.4f}, Validation Loss: {val_loss:.4f}")
+    print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item()          :.4f}, Validation Loss: {val_loss:.4f}")
 
     # Save the model if validation loss improves
     if val_loss < best_val_loss:
@@ -284,6 +283,7 @@ for epoch in range(start_epoch, num_epochs):
         save_checkpoint(model, optimizer, epoch,
                         model_save_path, batch_idx, best_val_loss)
         print("Model saved!")
+
 
 # --- Chat Loop ---
 model.eval()

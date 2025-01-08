@@ -45,8 +45,8 @@ def save_checkpoint(model, optimizer, epoch, file_path, batch_idx=None, val_loss
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'epoch': epoch,
-        'batch_idx': batch_idx,  # Optional
-        'val_loss': val_loss    # Optional
+        'batch_idx': batch_idx,
+        'val_loss': val_loss
     }
     torch.save(checkpoint, file_path)
     print(f"Model checkpoint saved to {file_path}")

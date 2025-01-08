@@ -168,14 +168,14 @@ class GPTLanguageModel(nn.Module):
 # --- Hyperparameters ---
 file_path = 'data.json'  # Update with your JSON file path
 model_save_path = 'trained_model.pt'
-block_size = 128
+block_size = 512
 batch_size = 16
-n_embd = 128
-n_head = 4
-n_layer = 4
-dropout = 0.2
-num_epochs = 150
-learning_rate = 1e-3
+n_embd = 384
+n_head = 8
+n_layer = 6
+dropout = 0.1
+num_epochs = 15
+learning_rate = 1e-4
 
 # Create dataset and split into training and validation sets
 dataset = JSONDataset(file_path, block_size)

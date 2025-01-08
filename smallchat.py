@@ -8,16 +8,14 @@ SmallchatGPT is distributed in the hope that it will be useful, but WITHOUT ANY 
 You should have received a copy of the GNU General Public License along with SmallchatGPT. If not, see <https://www.gnu.org/licenses/>.
 '''
 
-import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
 import os
-import json
 from data_utils import JSONDataset
-from utils import signal_handler, save_checkpoint, interrupted
+from utils import save_checkpoint, interrupted
 
 # --- Model Definition ---
 

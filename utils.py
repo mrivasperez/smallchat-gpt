@@ -11,7 +11,6 @@ You should have received a copy of the GNU General Public License along with Sma
 import torch
 import signal
 import sys
-import os
 
 # Define a flag to indicate if the signal has been received
 interrupted = False

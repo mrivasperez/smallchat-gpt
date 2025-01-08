@@ -8,6 +8,7 @@ SmallchatGPT is distributed in the hope that it will be useful, but WITHOUT ANY 
 You should have received a copy of the GNU General Public License along with SmallchatGPT. If not, see <https://www.gnu.org/licenses/>.
 '''
 
+import sys
 import torch
 import signal
 
@@ -37,3 +38,4 @@ def save_checkpoint(model, optimizer, epoch, file_path, batch_idx=None, val_loss
     }
     torch.save(checkpoint, file_path)
     print(f"Model checkpoint saved to {file_path}")
+    sys.exit(0)

@@ -8,17 +8,20 @@ SmallchatGPT is distributed in the hope that it will be useful, but WITHOUT ANY 
 You should have received a copy of the GNU General Public License along with SmallchatGPT. If not, see <https://www.gnu.org/licenses/>.
 '''
 
+import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.tensorboard import SummaryWriter  # Import SummaryWriter
 import os
+import json
 from data_utils import JSONDataset
-# type: ignore used in signal handling
-from utils import save_checkpoint, interrupted, signal_handler
-
+from utils import signal_handler, save_checkpoint, interrupted
 
 # --- Model Definition ---
+
+
 class Head(nn.Module):
     """ one head of self-attention """
 
@@ -36,11 +39,14 @@ class Head(nn.Module):
         B, T, C = x.shape
         k = self.key(x)   # (B,T,C)
         q = self.query(x)  # (B,T,C)
+        # compute attention scores ("affinities")
+        # (B, T, C) @ (B, C, T) -> (B, T, T)
         wei = q @ k.transpose(-2, -1) * C**-0.5
         wei = wei.masked_fill(
             self.tril[:T, :T] == 0, float('-inf'))  # (B, T, T)
         wei = F.softmax(wei, dim=-1)  # (B, T, T)
         wei = self.dropout(wei)
+        # perform the weighted aggregation of the values
         v = self.value(x)  # (B,T,C)
         out = wei @ v  # (B, T, T) @ (B, T, C) -> (B, T, C)
         return out
@@ -170,7 +176,7 @@ n_embd = 128
 n_head = 4
 n_layer = 4
 dropout = 0.2
-num_epochs = 50
+num_epochs = 150
 learning_rate = 1e-3
 
 # Create dataset and split into training and validation sets
@@ -191,26 +197,46 @@ model.to(device)
 optimizer = torch.optim.AdamW(
     model.parameters(), lr=learning_rate, weight_decay=1e-1)
 
+# Create a SummaryWriter instance
+writer = SummaryWriter()
+
 
 # --- Training Loop ---
-def train(model, data_loader, optimizer, device):
+
+
+def train(model, data_loader, optimizer, device, epoch, writer):
     model.train()
+    total_loss = 0
+    num_batches = len(data_loader)
     for batch_idx, (x, y) in enumerate(data_loader):
         x, y = x.to(device), y.to(device)
         logits, loss = model(x, y)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         optimizer.step()
+
+        total_loss += loss.item()
+
+        # print(f"interrupted flag: {interrupted}")  # Print statement
+        if interrupted:
+            print("Saving model and exiting...")
+            save_checkpoint(model, optimizer, epoch,
+                            model_save_path, batch_idx, best_val_loss)
+            return sys.exit(0)
+
         if batch_idx % 10 == 0:
             print(
-                f"Batch {batch_idx+1}/{len(data_loader)}, Loss: {loss.item():.4f}")
-        if interrupted:
-            return loss.item()
-    return loss.item()
+                f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{num_batches}, Loss: {loss.item():.4f}")
+            # Log training loss to TensorBoard
+            writer.add_scalar(
+                "Loss/train", loss.item(), epoch * num_batches + batch_idx)
 
+    return total_loss / num_batches
 
 # --- Validation Loop ---
-def validate(model, data_loader, device):
+
+
+def validate(model, data_loader, device, epoch, writer):
     model.eval()
     total_loss = 0
     with torch.no_grad():
@@ -218,14 +244,18 @@ def validate(model, data_loader, device):
             x, y = x.to(device), y.to(device)
             logits, loss = model(x, y)
             total_loss += loss.item()
-    return total_loss / len(data_loader)
+
+    avg_val_loss = total_loss / len(data_loader)
+    # Log validation loss to TensorBoard
+    writer.add_scalar("Loss/val", avg_val_loss, epoch)
+    return avg_val_loss
 
 
 # --- Check for Saved Model ---
 if os.path.exists(model_save_path):
     # Load the saved model
     print("Loading saved model...")
-    checkpoint = torch.load(model_save_path, map_location=device)
+    checkpoint = torch.load(model_save_path, map_location=torch.device('cpu'))
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     start_epoch = checkpoint['epoch']
@@ -236,8 +266,8 @@ if os.path.exists(model_save_path):
     # Default to infinity if not found
     best_val_loss = checkpoint.get('val_loss', float('inf'))
 
-    model.to(device)
-    print("Model loaded!")
+    model.to(device)  # Make sure to move the loaded model to the correct device
+    print(f"Model loaded! Resuming training from epoch {start_epoch + 1}")
 else:
     # Train a new model
     print("No saved model found. Starting training...")
@@ -246,43 +276,21 @@ else:
     best_val_loss = float('inf')
 
 # Train a new model
-print("No saved model found. Starting training...")
 for epoch in range(start_epoch, num_epochs):
-    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    if epoch == start_epoch:
-        start_batch_index = start_batch + 1
-    else:
-        start_batch_index = 0
-    for batch_idx, (x, y) in enumerate(data_loader):
-        if batch_idx < start_batch_index:
-            continue
-        x, y = x.to(device), y.to(device)
-        logits, loss = model(x, y)
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
-
-        if interrupted:
-            print("Saving model and exiting...")
-            save_checkpoint(model, optimizer, epoch,
-                            model_save_path, batch_idx, best_val_loss)
-            exit()
-
-        if batch_idx % 10 == 0:
-            print(f"Epoch {epoch+1}/{num_epochs}, Batch {batch_idx +
-                  1}/{len(data_loader)}, Loss: {loss.item():.4f}")
-
-    val_loss = validate(model, val_loader, device)
-    print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {loss.item():.4f}, Validation Loss: {val_loss:.4f}")
+    data_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True)
+    train_loss = train(model, train_loader, optimizer, device, epoch, writer)
+    val_loss = validate(model, val_loader, device, epoch, writer)
+    print(
+        f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
 
     # Save the model if validation loss improves
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         print("Saving model...")
         save_checkpoint(model, optimizer, epoch,
-                        model_save_path, batch_idx, best_val_loss)
+                        model_save_path, val_loss=best_val_loss)
         print("Model saved!")
-
 
 # --- Chat Loop ---
 model.eval()

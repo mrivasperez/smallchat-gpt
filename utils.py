@@ -8,19 +8,32 @@ SmallchatGPT is distributed in the hope that it will be useful, but WITHOUT ANY 
 You should have received a copy of the GNU General Public License along with SmallchatGPT. If not, see <https://www.gnu.org/licenses/>.
 '''
 
-import sys
 import torch
 import signal
+import sys
+import os
 
 # Define a flag to indicate if the signal has been received
 interrupted = False
 
+# Signal handler function
 
-# Signal handler function (called by OS when SIGINT is received)
+
 def signal_handler(signum, frame):
     global interrupted
     interrupted = True
     print("\nSignal received. Saving model and exiting...")
+
+    # Access the global model, optimizer, etc. from smallchat.py
+    # Assuming smallchat.py is in the same directory or in a directory in your Python path
+    from smallchat import model, optimizer, model_save_path, epoch, best_val_loss
+
+    # Save the model and other necessary variables
+    save_checkpoint(model, optimizer, epoch,
+                    model_save_path, val_loss=best_val_loss)
+
+    # Terminate the process
+    sys.exit(0)  # Exit with a success code (0)
 
 
 # Register the signal handler
@@ -38,4 +51,3 @@ def save_checkpoint(model, optimizer, epoch, file_path, batch_idx=None, val_loss
     }
     torch.save(checkpoint, file_path)
     print(f"Model checkpoint saved to {file_path}")
-    sys.exit(0)

@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, random_split
-from torch.utils.tensorboard import SummaryWriter  # Import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 import os
 import json
 from data_utils import JSONDataset
@@ -217,12 +217,12 @@ def train(model, data_loader, optimizer, device, epoch, writer):
 
         total_loss += loss.item()
 
-        # print(f"interrupted flag: {interrupted}")  # Print statement
+        # Check for interruption signal after each batch
         if interrupted:
             print("Saving model and exiting...")
             save_checkpoint(model, optimizer, epoch,
                             model_save_path, batch_idx, best_val_loss)
-            return sys.exit(0)
+            return  # Exit the training function
 
         if batch_idx % 10 == 0:
             print(
